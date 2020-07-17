@@ -1,59 +1,144 @@
 package gobingo
 
 import (
+	"encoding/binary"
+	"encoding/hex"
+	"errors"
 	"strconv"
 	"strings"
 )
 
 const (
-	defaultWidth  = 5
-	defaultHeight = 5
-	sep           = '\n'
-	space         = ' '
-	f             = 'F'
+	sep   = '\n'
+	space = ' '
+	f     = 'F'
+
+	EIGHT_MASK = 0b11111111
+	LOW_MASK   = 0b00001111
 )
 
-type Grid [][]int
+// Grid stores bingo state in 128 bits
+// bits 0-95: numbers (as nibbles)
+// bits 96-121: state
+type Grid [2]uint64
 
-func (g Grid) String() string {
-	sb := strings.Builder{}
-	for i, r := range g {
-		if i > 0 {
-			sb.WriteByte(sep)
+func (g Grid) ToNibbles() (n [16]Nibbles) {
+	for i := 1; i >= 0; i-- {
+		half := g[i]
+		for j := 7; j >= 0; j-- {
+			n[j+i*8] = Nibbles(half & EIGHT_MASK)
+			half >>= 8
 		}
-		for j, c := range r {
-			if j > 0 {
-				sb.WriteByte(space)
-			}
+	}
+	return
+}
 
-			// if middlemost, its a free space. so write F
-			if i == 2 && j == 2 {
-				sb.WriteByte(space)
-				sb.WriteByte(f)
-				continue
-			}
+// String plops out a displayable version of the board and its status
+func (g Grid) String() string {
 
-			// write the actual character. prefix with a space if sub-10
-			if c < 10 {
-				sb.WriteByte(space)
-			}
-			sb.WriteString(strconv.Itoa(c))
+	nibs := g.ToNibbles()
+	sb := strings.Builder{}
+
+	// grab the 'state' and put it in an array of bools
+	isSet := [24]bool{}
+	for i := 0; i < 3; i++ {
+		data := nibs[12+i]
+		for j := 0; j < 8; j++ {
+			isSet[j+i*8] = (data & (1 << j)) != 0
 		}
 	}
 
+	skip := 0
+	inc := 1
+	for i := 0; i < 12; i++ {
+		for j := 0; j < 2; j++ {
+			var data uint8
+			switch j {
+			case 0:
+				data = nibs[i].Left()
+			case 1:
+				data = nibs[i].Right()
+			}
+
+			addRow := ((inc + skip - 1) / 5) * 15
+
+			number := int(data) + addRow
+			numberString := strconv.Itoa(number)
+
+			if number < 10 {
+				sb.WriteByte(space)
+			}
+
+			sb.WriteString(numberString)
+
+			if inc == 12 {
+				sb.WriteByte(space)
+				sb.WriteByte(space)
+				sb.WriteByte(f)
+				skip = 1
+			}
+
+			if inc > 0 && (inc+skip)%5 == 0 {
+				if isSet[inc-1] {
+					sb.WriteByte('*')
+				}
+				sb.WriteByte(sep)
+			} else if isSet[inc-1] {
+				sb.WriteByte('*')
+			} else {
+				sb.WriteByte(space)
+			}
+			inc++
+		}
+	}
 	return sb.String()
 }
 
-// Bingo contains methods to generate bingo cards
-type Bingo struct {
+// Nibbles is basically circumventing golang not having a uint4 by treating a uint8 as a tuple. There is probably a
+// better way to do this. A Nibbles object has a left and a right nibble, which work the way you expect them too.
+type Nibbles uint8
+
+func (n Nibbles) Left() uint8 {
+	return uint8(n) >> 4
 }
 
-func (b *Bingo) GetGrid(guid string) Grid {
-	return nil
+func (n Nibbles) Right() uint8 {
+	return uint8(n) & LOW_MASK
 }
 
-// Returns a "random"-ish identifier
-func (b *Bingo) NewIdentifier() string {
+func ToGrid(guid string) (grid Grid, err error) {
+	sanitized := strings.Replace(guid, "-", "", 4)
+	data, err := hex.DecodeString(sanitized)
+	if err != nil {
+		return
+	}
 
-	return ""
+	if len(data) < 16 {
+		err = errors.New("not enough data on string")
+		return
+	}
+
+	grid[0] = binary.LittleEndian.Uint64(data[0:8])
+	grid[1] = binary.LittleEndian.Uint64(data[8:])
+	return
+}
+
+func FromGrid(grid Grid) (guid string) {
+	data := make([]byte, 16)
+	binary.LittleEndian.PutUint64(data[:8], grid[0])
+	binary.LittleEndian.PutUint64(data[8:], grid[1])
+
+	b := strings.Builder{}
+
+	for i, c := range hex.EncodeToString(data) {
+		switch i {
+		case 8, 12, 16, 20:
+			b.WriteByte('-')
+			fallthrough
+		default:
+			b.WriteRune(c)
+		}
+	}
+
+	return b.String()
 }
